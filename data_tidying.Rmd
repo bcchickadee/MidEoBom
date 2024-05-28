@@ -1,0 +1,690 @@
+---
+title: "초등학교 돌봄교실의 사적 돌봄 대체 가능성 모색"
+subtitle: "데이터 정리"
+author: "믿어봄"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+header-includes:
+  - \usepackage[CJKspace]{xeCJK}
+  - \setCJKmainfont{Nanum Myeongjo}
+  - \setCJKmonofont{D2Coding}
+  - \usepackage[normalem]{ulem}
+papersize: a4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse); library(magrittr); library(showtext); library(gt); library(geosphere); library(ggmap)
+font_add_google("Nanum Gothic", "nanum")
+showtext_auto()
+```
+
+# Importing Data
+
+|  관련 데이터를 불러온다.
+
+1. 학교 기본정보 (학교명, 위치, 정보)
+
+```{r Import-1: Importing Basic School Information}
+school_info <- read_csv("data/undefined년도_학교기본정보(초)_전체.csv")
+
+school_info %>% 
+  head() %>% 
+  gt()
+```
+
+2. 학교별 학년별/학급별 학생 수
+
+```{r Import-2: Importing Student Number by School}
+student_num <- read_csv("data/2023년도_학년별·학급별 학생수(초)_전체.csv")
+
+student_num %>% 
+  head() %>% 
+  gt()
+```
+
+3. 학교별 방과후학교 등 운영 현황
+
+```{r Import-3: Importing After School Programs by School}
+after_school <- read_csv("data/2023년도_방과후학교 운영 계획 및 운영ㆍ지원현황(초)_전체.csv")
+
+after_school %>% 
+  head() %>% 
+  gt()
+```
+
+# Joining Data
+
+|  세 데이터에서 필요한 데이터를 합쳐야 한다.
+
+```{r Tidy-1: Joining Dataframes}
+school_info_selection <- school_info %>% 
+  select(`정보공시 학교코드`, 법정동코드, 주소내역, 상세주소내역, `학교도로명 우편번호`, `학교도로명 주소`, `학교도로명 상세주소`, 위도, 경도)
+
+student_num_selection <- student_num %>% 
+  select(!c(시도교육청, 교육지원청, 지역, 학교명, 학교급코드, 설립구분, 제외여부, 제외사유))
+
+main_df <- after_school %>% 
+  left_join(school_info_selection, by = join_by(`정보공시 학교코드` == `정보공시 학교코드`)) %>% 
+  left_join(student_num_selection, by = join_by(`정보공시 학교코드` == `정보공시 학교코드`))
+
+head(main_df) %>% 
+  gt()
+
+main_df %>% 
+  str()
+```
+
+|  여기서 우리가 궁금한 것은 "학생 중 돌봄참여학생 수의 비율"이다. 따라서 이러한 변수를 만들면
+
+```{r Tidy-2: Adding New Proportion Variable}
+main_df %<>% 
+  mutate(prop = (`초등돌봄교실 오후돌봄참여학생수`) / `학생수(계)`)
+```
+
+일단, 설명변수 $X$으로 선정하는 변수에 관한 자료를 import 및 tidy해야 한다.
+
+# Importing and Tidying Data of Explanatory Variables
+
+|  데이터마다 행정구역 이름이 살짝씩 다르기 때문에 먼저 명칭을 통일한다.
+
+```{r}
+region_std_names_new <- c("전국" = "전국",
+                          "서울" = "서울특별시", "부산" = "부산광역시", "대구" = "대구광역시",
+                          "인천" = "인천광역시", "광주" = "광주광역시", "대전" = "대전광역시",
+                          "울산" = "울산광역시", "세종" = "세종특별자치시", "경기" = "경기도",
+                          "강원" = "강원특별자치도", "충북" = "충청북도", "충남" = "충청남도",
+                          "전북" = "전북특별자치도", "전남" = "전라남도", "경북" = "경상북도",
+                          "경남" = "경상남도", "제주" = "제주특별자치도")
+region_std_names_old <- c("전국" = "전국",
+                          "서울" = "서울특별시", "부산" = "부산광역시", "대구" = "대구광역시",
+                          "인천" = "인천광역시", "광주" = "광주광역시", "대전" = "대전광역시",
+                          "울산" = "울산광역시", "세종" = "세종특별자치시", "경기" = "경기도",
+                          "강원" = "강원도", "충북" = "충청북도", "충남" = "충청남도",
+                          "전북" = "전라북도", "전남" = "전라남도", "경북" = "경상북도",
+                          "경남" = "경상남도", "제주" = "제주특별자치도")
+
+region_name_df <- tibble(
+  abbr = names(region_std_names_new),
+  new = region_std_names_new,
+  old = region_std_names_old
+)
+```
+
+
+## 소득 자료
+
+```{r Expl-Import-Income-1: Income Data}
+income <- read_csv("data/explanatory/income/국민연금공단_자격 시구신고 평균소득월액_20200531.csv",
+                   locale = locale(encoding = "euc-kr"))
+```
+
+```{r Expl-Import-Income-2: Income Data}
+regions_income <- region_name_df$old
+
+regions_reg_income <- str_c(regions_income, collapse = "|")
+
+income %<>% 
+  mutate(region_1 = str_extract(시군구, regions_reg_income)) %>% 
+  separate(col = 시군구, into = c(NA, "region_2"), sep = regions_reg_income) %>%
+  select(region_1, region_2, 평균소득월액) %>% 
+  mutate(region_1 = ifelse(region_2 == "군위군", "대구광역시", region_1)) %>% 
+  mutate(region_1 = fct_recode(factor(region_1), !!!region_std_names_old))
+
+income %>% 
+  arrange(desc(평균소득월액)) %>% 
+  head(10) %>% 
+  gt()
+```
+
+
+## 인구당 사설학원 수
+
+```{r Expl-Import-Hagwon-1: Hagwon Data}
+hagwon <- read_csv("data/explanatory/education/인구_천명당_사설학원수_시도_시_군_구__20240520104417.csv",
+                   skip = 1)
+```
+
+```{r Expl-Import-Hagwon-2: Hagwon Data}
+region_std_names_hagwon <- region_std_names_new
+region_std_names_hagwon["전북"] <- "전라북도"
+regions_hagwon <- region_std_names_hagwon
+
+regions_reg_hagwon <- str_c(regions_hagwon, collapse = "|")
+
+hagwon_index <- hagwon$행정구역별 %>%
+  str_which(regions_reg_hagwon)
+
+hagwon_times <- c(diff(hagwon_index), (nrow(hagwon) - tail(hagwon_index, 1) + 1))
+
+hagwon %<>%
+  mutate(region_1 = rep(hagwon$행정구역별[hagwon_index], times = hagwon_times),
+         `인구 천명당 사설학원수<br>(A÷B×1000) (개)` = (`사설학원수<br>(A) (개)` / `주민등록인구<br>(B) (명)` * 1e3)) %>% 
+  rename(region_2 = 행정구역별) %>% 
+  select(region_1, region_2, everything()) %>% 
+  mutate(region_1 = ifelse(region_2 == "군위군", "대구광역시", region_1)) %>% 
+  mutate(region_1 = fct_recode(factor(region_1), !!!region_std_names_hagwon),
+         region_2 = ifelse(region_2 == "세종특별자치시", "", region_2))
+
+hagwon %>% 
+  arrange(desc(`인구 천명당 사설학원수<br>(A÷B×1000) (개)`)) %>% 
+  head(10) %>% 
+  gt()
+```
+
+
+## 경력단절여성 가구 비율
+
+```{r Expl-Import-Career-1: Career Data}
+career <- read_csv("data/explanatory/welfare/시도별_경력단절_여성이_있는_가구_20세이상__일반가구_시도_20240520112308.csv",
+                   skip = 1)
+```
+
+```{r Expl-Import-Career-2: Career Data}
+regions_career <- region_name_df$old
+
+regions_reg_career <- str_c(regions_career, collapse = "|")
+
+career_index <- career$`행정구역별(시도)` %>%
+  str_which(regions_reg_career)
+
+career_times <- c(diff(career_index), (nrow(career) - tail(career_index, 1) + 1))
+
+career %<>% 
+  mutate(region_1 = rep(career$`행정구역별(시도)`[career_index], times = career_times),
+         region_2 = ifelse(region_1 == `행정구역별(시도)`, "총계", `행정구역별(시도)`)) %>% 
+  select(region_1, region_2, `일반가구-계`, `경력단절여성이 있는 가구`, `경력단절여성이 없는 가구`) %>% 
+  mutate(career_prop = `경력단절여성이 있는 가구` / `일반가구-계`,
+         region_1 = fct_recode(factor(region_1), !!!region_std_names_old)) %>% 
+  mutate(region_2 = ifelse(region_1 %in% c("서울", "광주", "대전"), "동부", region_2))
+
+career %>% 
+  arrange(desc(career_prop)) %>% 
+  head(10) %>% 
+  gt()
+```
+
+## 다문화가구 현황
+
+```{r Expl-Import-Immig-1: Immigrant Data}
+immig <- read_csv("data/explanatory/welfare/110_DT_110025_A045_A_20240520120810.csv",
+                  locale = locale(encoding = "euc-kr"))
+
+immig %<>% 
+  select(!...6) %>% 
+  filter(다문화가구별 == "합계") %>% 
+  mutate(`2022 년` = parse_number(`2022 년`, na = c("*")),
+         `행정구역(읍면동)별` = ifelse(`행정구역(읍면동)별` == "전라북도", "전북특별자치도", `행정구역(읍면동)별`))
+```
+
+```{r Expl-Import-Immig-2: Immigrant Data}
+# 광역지방자치단체
+regions_1_immig <- region_name_df$new
+
+regions_1_reg_immig <- str_c(regions_1_immig, collapse = "|")
+
+immig_1_index <- immig$`행정구역(읍면동)별` %>%
+  str_which(regions_1_reg_immig)
+
+immig_1_times <- c(diff(immig_1_index), (nrow(immig) - tail(immig_1_index, 1) + 1))
+
+immig %<>% 
+  mutate(region_1 = rep(immig$`행정구역(읍면동)별`[immig_1_index], times = immig_1_times)) %>% 
+  filter(`행정구역(읍면동)별` != region_1)
+
+# 기초지방자치단체
+regions_2_immig_df <- immig %>% 
+  select(region_1, `행정구역(읍면동)별`)
+
+capital <- str_subset(regions_1_immig, "(특별시)$")
+capital_df <- regions_2_immig_df %>% 
+  filter(region_1 %in% capital,
+         str_detect(`행정구역(읍면동)별`, "구$"))
+
+metro <- c(str_subset(regions_1_immig, "(광역시)$"))
+metro_df <- regions_2_immig_df %>% 
+  filter(region_1 %in% metro,
+         str_detect(`행정구역(읍면동)별`, "[구군]$"))
+
+sejong_df <- regions_2_immig_df %>% 
+  filter(`행정구역(읍면동)별` == "세종시")
+
+state <- str_subset(regions_1_immig, "(도)$")
+state_df <- regions_2_immig_df %>% 
+  filter(region_1 %in% state,
+         str_detect(`행정구역(읍면동)별`, "[시군]$"))
+
+regions_2_immig <- c(
+  capital_df$`행정구역(읍면동)별`,
+  metro_df$`행정구역(읍면동)별`,
+  sejong_df$`행정구역(읍면동)별`,
+  state_df$`행정구역(읍면동)별`
+)
+
+regions_2_reg_immig <- str_c(regions_2_immig, collapse = "|")
+
+immig_2_index <- immig$`행정구역(읍면동)별` %>%
+  str_which(regions_2_reg_immig)
+
+immig_2_times <- c(diff(immig_2_index), (nrow(immig) - tail(immig_2_index, 1) + 1))
+
+immig %<>% 
+  mutate(region_2 = rep(immig$`행정구역(읍면동)별`[immig_2_index], times = immig_2_times)) %>% 
+  filter(`행정구역(읍면동)별` != region_2) %>% 
+  separate(region_2, sep = " ", into = c("region_2", "region_3"), fill = "right") %>% 
+  select(region_1, region_2, region_3, `행정구역(읍면동)별`, `2022 년`) %>% 
+  rename(region_4 = `행정구역(읍면동)별`, value = `2022 년`) %>% 
+  mutate(region_1 = fct_recode(factor(region_1), !!!region_std_names_new))
+
+immig %>% 
+  head(10) %>% 
+  gt()
+```
+
+## 기초수급자 비율
+
+```{r Expl-Import-LowIncome-1: Low Income Data}
+low_income <- read_csv("data/explanatory/welfare/기초생활보장_대상자_및_장애인_등록률_20240520143125.csv",
+                       locale = locale(encoding = "euc-kr"),
+                       skip = 1)
+```
+
+```{r Expl-Import-LowIncome-2: Low Income Data}
+low_income %<>% 
+  select(`행정구역별(1)`, `행정구역별(2)`, `국민기초생활보장 수급자비율 (%)`) %>% 
+  rename(region_1 = `행정구역별(1)`,
+         region_2 = `행정구역별(2)`,
+         low_income_rate = `국민기초생활보장 수급자비율 (%)`) %>% 
+  mutate(region_2 = ifelse(region_1 == "세종특별자치시", "", region_2)) %>% 
+  mutate(region_1 = ifelse(region_2 == "군위군", "대구광역시", region_1)) %>% 
+  mutate(region_1 = ifelse(region_1 == "전라북도", "전북특별자치도", region_1)) %>% 
+  mutate(region_1 = fct_recode(factor(region_1), !!!region_std_names_new))
+
+low_income %>% 
+  head(10) %>% 
+  gt()
+```
+
+
+## 사회복지시설 (아동복지시설) 수
+
+```{r Expl-Import-Welfare-1: Child Welfare Data}
+child_welfare <- read_csv("data/explanatory/welfare/사회복지시설수_20240520140825.csv",
+                          locale = locale(encoding = "euc-kr"),
+                          skip = 2, na = "-")
+
+child_welfare %<>% 
+  mutate(`행정구역별(1)` = ifelse(`행정구역별(1)` == "전라북도", "전북특별자치도", `행정구역별(1)`)) %>% 
+  mutate(`행정구역별(2)` = ifelse(`행정구역별(1)` == "세종특별자치시", "", `행정구역별(2)`)) %>% 
+  mutate(`행정구역별(1)` = ifelse(`행정구역별(2)` == "군위군", "대구광역시", `행정구역별(1)`)) %>% 
+  mutate(`시설수 (개소)` = ifelse(is.na(`시설수 (개소)`), 0, `시설수 (개소)`),
+         `생활인원수 (명)` = ifelse(is.na(`생활인원수 (명)`), 0, `생활인원수 (명)`),
+         `행정구역별(1)` = fct_recode(factor(`행정구역별(1)`), !!!region_std_names_new))
+
+child_welfare %>% 
+  head(10) %>% 
+  gt()
+```
+
+## 인구 중 초등학생 연령 비율
+
+```{r Expl-Import-Popul-1: Population Data}
+popul <- read_csv("data/explanatory/행정구역_시군구_별_1세별_주민등록인구_20240520134635.csv",
+                  locale = locale(encoding = "euc-kr"), skip = 1) %>% 
+  distinct()
+```
+
+```{r Expl-Import-Popul-2: Population Data}
+regions_popul <- region_name_df$new
+
+regions_reg_popul <- str_c(regions_popul, collapse = "|")
+
+popul_index <- popul$`행정구역(시군구)별` %>%
+  str_which(regions_reg_popul)
+
+popul_times <- c(diff(popul_index), (nrow(popul) - tail(popul_index, 1) + 1))
+
+popul %<>% 
+  mutate(region_1 = rep(popul$`행정구역(시군구)별`[popul_index], times = popul_times),
+         region_2 = ifelse(region_1 == `행정구역(시군구)별`, "총계", `행정구역(시군구)별`)) %>% 
+  select(region_1, region_2, 연령별, `총인구수 (명)`) %>% 
+  spread(key = 연령별, value = `총인구수 (명)`) %>% 
+  filter(계 > 0) %>% 
+  mutate(popul_prop = (`8세` + `9세` + `10세` + `11세` + `12세` + `13세`) / 계) %>% 
+  select(region_1, region_2, popul_prop) %>% 
+  mutate(region_2 = ifelse(region_2 == "창원시(통합)", "창원시", region_2)) %>% 
+  mutate(region_2 = ifelse(region_1 == "세종특별자치시", "", region_2)) %>% 
+  mutate(region_1 = fct_recode(factor(region_1), !!!region_std_names_new))
+
+popul %>% 
+  head(10) %>% 
+  gt()
+```
+
+## 지역별 돌봄 형태 정리
+
+```{r Expl-Import-Care-1: Caring Type Data}
+care <- read_csv("data/explanatory/welfare/아동인원수별_보육상태별_아동인구_12세이하__일반가구_시도_20240520144629.csv",
+                 locale = locale(encoding = "euc-kr"),
+                 skip = 1, na = "-")
+```
+
+```{r Expl-Import-Care-2: Caring Type Data}
+regions_care <- region_name_df$old
+
+regions_reg_care <- str_c(regions_care, collapse = "|")
+
+care_index <- care$`행정구역별(시도)` %>%
+  str_which(regions_reg_care)
+
+care_times <- c(diff(care_index), (nrow(care) - tail(care_index, 1) + 1))
+
+care %<>% 
+  map_df(\(x) if(typeof(x) == "double") ifelse(is.na(x), 0, x) else x) %>% 
+  mutate(region_1 = rep(care$`행정구역별(시도)`[care_index], times = care_times),
+         region_2 = ifelse(region_1 == `행정구역별(시도)`, "총계", `행정구역별(시도)`),
+         alt_care_rate = (`지역아동센터` + `방과후학교 초등돌봄교실+지역아동센터`) / `아동(12세 이하)-계`) %>% 
+  select(region_1, region_2, alt_care_rate) %>% 
+  mutate(region_1 = fct_recode(factor(region_1), !!!region_std_names_old)) %>% 
+  mutate(region_2 = ifelse(region_1 %in% c("서울", "광주", "대전"), "동부", region_2))
+
+care %>% 
+  head(10) %>% 
+  gt()
+```
+
+## 지역별 사교육 참여율
+
+```{r Expl-Import-HagwonRate-1: Hagwon Rate Data}
+hagwon_rate <- read_csv("data/explanatory/hagwon/2023_연간자료_C형(2019년~)_20240525_45077.csv",
+                        locale = locale(encoding = "euc-kr")) %>% 
+  mutate(지역구분코드 = fct_recode(factor(지역구분코드),
+                             서울 = "1", 광역시 = "2", 중소도시 = "3", 읍면지역 = "4"),
+         행정구역시도코드 = fct_recode(factor(행정구역시도코드),
+                               서울 = "11", 부산 = "21", 대구 = "22", 인천 = "23", 광주 = "24", 대전 = "25", 울산 = "26", 세종 = "29", 경기 = "31", 강원 = "32", 충북 = "33", 충남 = "34", 전북 = "35", 전남 = "36", 경북 = "37", 경남 = "38", 제주 = "39")) %>% 
+  group_by(지역구분코드, 행정구역시도코드, 학년) %>% 
+  summarize(rate = mean(as.numeric(사교육참여시간수 > 0), na.rm = T)) %>% 
+  spread(key = 학년, value = rate) %>% 
+  rename(hagwon_rate_1 = `1`, hagwon_rate_2 = `2`, hagwon_rate_3 = `3`, hagwon_rate_4 = `4`, hagwon_rate_5 = `5`, hagwon_rate_6 = `6`)
+
+hagwon_rate %>% 
+  head(10) %>% 
+  gt()
+```
+
+# Tidying to Join School-Related Dataframe (`main_df`) and Explanatory Variable Dataframe
+
+|  Copy and assign a new df (`join_df`) for joining:
+
+```{r Expl-Join-1: Making Join Df}
+join_df <- main_df %>% 
+  rename(dolbom_prop = prop)
+
+join_df %>% 
+  select(학교명, 지역, dolbom_prop) %>% 
+  head(10) %>% 
+  gt()
+```
+
+## Joining 소득 자료 (`income`)
+
+```{r Expl-Join-Income-1: Joining Income Df}
+join_df %<>% 
+  separate(지역, sep = " ", into = c("시도", "시군구"), extra = "drop", fill = "right") %>% 
+  mutate(시도 = fct_recode(factor(시도), !!!region_std_names_new),
+         시군구 = ifelse(is.na(시군구), "", 시군구)) %>%
+  left_join(income, by = join_by(시군구 == region_2, 시도 == region_1))
+
+join_df %>% 
+  select(학교명, 시도, 시군구, 평균소득월액) %>% 
+  head(10) %>% 
+  gt()
+```
+
+## Joining 인구당 사설학원 수 (`hagwon`)
+
+```{r Expl-Join-Hagwon-1: Joining Hagwon Df}
+join_df %<>% 
+  left_join(hagwon, by = join_by(시군구 == region_2, 시도 == region_1))
+
+join_df %>% 
+  select(학교명, 시도, 시군구, `인구 천명당 사설학원수<br>(A÷B×1000) (개)`) %>% 
+  head(10) %>% 
+  gt()
+```
+
+## Joining 경력단절 여성 비율 (`career`)
+
+|  읍면동 중 어느 것인지 알기 위하여 전국 법정동코드 데이터를 사용하였다. [출처](https://www.data.go.kr/data/15063424/fileData.do)
+
+```{r Expl-Join-Career-1: Joining Region Info}
+region_info <- read_csv("data/국토교통부_전국 법정동_20240513.csv",
+                        locale = locale(encoding = "euc-kr"))
+
+find_region_type_prot <- function(str) {
+  str_lindex <- str_sub(str, start = -1)
+  if (is.na(str_lindex)) {
+    return(NA)
+  } else if(str_lindex %in% c("가", "동", "로")) {
+    return("동부")
+  } else if (str_lindex == "면") {
+      return("면부")
+  } else if (str_lindex == "읍") {
+      return("읍부")
+    } else return(NA)
+}
+
+find_region_type <- function(vec) {
+  return(map_chr(vec, find_region_type_prot))
+}
+
+region_info %<>% 
+  mutate(region_type = find_region_type(읍면동명))
+
+region_info %>% 
+  head(10) %>% 
+  gt()
+```
+
+
+```{r Expl-Join-Career-2: Joining Income Df}
+region_info_join <- region_info %>% 
+  select(법정동코드, region_type)
+
+join_df %<>% 
+  left_join(region_info_join, by = join_by(법정동코드 == 법정동코드)) %>% 
+  left_join(career, by = join_by(시도 == region_1, region_type == region_2))
+
+join_df %>% 
+  select(시도, 시군구, 학교명, 법정동코드, region_type, career_prop) %>% 
+  head(10) %>% 
+  gt()
+```
+
+## Joining 다문화가구 현황 (`immig`)
+
+```{r Expl-Join-Immig-1: Tidying region information data to join with Immig Df}
+region_info_join_immig <- region_info %>% 
+  filter(is.na(삭제일자)) %>% 
+  mutate(시도명 = fct_recode(factor(시도명), !!!region_std_names_new))
+
+region_info_join_immig %>% 
+  head(10) %>% 
+  gt()
+```
+
+
+```{r Expl-Join-Immig-2: Joining Immig Df}
+immig_join <- immig %>% 
+  mutate(region_3 = ifelse((is.na(region_3) & !is.na(region_4)), region_4, region_3),
+         region_4 = ifelse((!is.na(region_4) & (region_3 == region_4)), NA, region_4)) %>% 
+  left_join(region_info_join_immig, by = join_by(region_1 == 시도명, region_2 == 시군구명, region_3 == 읍면동명)) %>% 
+  rename(immig_value = value) %>% 
+  filter(!is.na(법정동코드)) %>% 
+  select(법정동코드, immig_value)
+
+immig_join %>% 
+  head(10) %>% 
+  gt()
+```
+
+```{r}
+join_df %<>% 
+  left_join(immig_join, by = join_by(법정동코드 == 법정동코드)) %>% 
+  mutate(immig_prop = immig_value / `주민등록인구<br>(B) (명)`)
+
+join_df %>% 
+  select(시도, 시군구, 학교명, immig_value) %>% 
+  head(10) %>% 
+  gt()
+```
+
+|  다문화가구 데이터는 행정동으로 되어 있고, 동 코드는 법정동으로 되어 있어서 법정동과 행정동이 다른 경우는 매칭하지 못했다. 그래서 다문화가구 데이터의 경우 결측치(`NA`)가 다수 존재한다.
+
+## Joining 기초수급자 비율 (`low_income`)
+
+```{r Expl-Join-LowIncome-1: Joining LowIncome Df}
+join_df %<>% 
+  left_join(low_income, by = join_by(시도 == region_1, 시군구 == region_2))
+
+join_df %>% 
+  select(시도, 시군구, 학교명, low_income_rate) %>% 
+  head(10) %>% 
+  gt()
+```
+
+## Joining 사회복지시설(아동복지시설) 수 (`child_welfare`)
+
+```{r Expl-Join-ChildWelfare-1: Joining ChildWelfare Df}
+join_df %<>% 
+  left_join(child_welfare, by = join_by(시도 == `행정구역별(1)`, 시군구 == `행정구역별(2)`)) %>% 
+  mutate(child_welfare_prop = `생활인원수 (명)` / `주민등록인구<br>(B) (명)`)
+
+join_df %>% 
+  select(시도, 시군구, 학교명, child_welfare_prop) %>% 
+  head(10) %>% 
+  gt()
+```
+
+## Joining 인구 중 초등학생 연령 비율 (`popul`)
+
+```{r Expl-Join-Popul-1: Joining Popul Df}
+join_df %<>% 
+  left_join(popul, by = join_by(시도 == region_1, 시군구 == region_2))
+
+join_df %>% 
+  select(시도, 시군구, 학교명, popul_prop) %>% 
+  head(10) %>% 
+  gt()
+```
+
+## Joining 지역 돌봄 형태 정리 (`care`)
+
+```{r Expl-Join-Care-1: Joining Care Df}
+join_df %<>% 
+  left_join(care, by = join_by(시도 == region_1, region_type == region_2))
+
+join_df %>% 
+  select(시도, 시군구, 학교명, alt_care_rate) %>%
+  head(10) %>% 
+  gt()
+```
+
+
+## Joining 지역별 사교육비 참여율 (`hagwon_rate`)
+
+```{r Expl-Join-HagwonRate-1: Joining HagwonRate Df}
+find_region_type_2_prot <- function(df, index) {
+  if (is.na(df[index,]$시도)) {return(NA)} else 
+    if (df[index,]$시도 == "서울") {
+      return("서울")
+      } else if (df[index,]$region_type %in% c("읍부", "면부")) {
+        return("읍면지역")
+        } else if (df[index,]$시도 %in% c("부산", "대구", "인천", "광주", "대전", "울산")) {
+          return("광역시")
+        } else return("중소도시")
+  }
+
+find_region_type_2 <- function(df) {
+  output <- c()
+  for (i in 1:nrow(df)) {
+    output <- c(output, find_region_type_2_prot(df, i))
+  }
+  return(output)
+}
+
+join_df %<>% 
+  mutate(region_type_2 = find_region_type_2(.)) %>% 
+  left_join(hagwon_rate, by = join_by(region_type_2 == 지역구분코드, 시도 == 행정구역시도코드)) %>% 
+  mutate(rate_1 = `1학년 학생수` / `학생수(계)`,
+         rate_2 = `2학년 학생수` / `학생수(계)`,
+         rate_3 = `3학년 학생수` / `학생수(계)`,
+         rate_4 = `4학년 학생수` / `학생수(계)`,
+         rate_5 = `5학년 학생수` / `학생수(계)`,
+         rate_6 = `6학년 학생수` / `학생수(계)`,
+         hagwon_rate_interpol = hagwon_rate_1 * rate_1 + hagwon_rate_2 * rate_2 + hagwon_rate_3 * rate_3 + hagwon_rate_4 * rate_4 + hagwon_rate_5 * rate_5 + hagwon_rate_6 * rate_6)
+
+join_df %>% 
+  select(시도, 시군구, 학교명, hagwon_rate_interpol) %>% 
+  head(10) %>% 
+  gt()
+```
+
+|  학년별 비율로 interpolation하여 간접적으로 학원 다니는 비율을 추정하였다.
+
+## Renaming Dataframe Columns
+
+|  `join_df` 내 변수 이름들이 너무 더럽다. 이것들을 한번 싹 정리하자.
+
+```{r Expl-Join-Rename-1: Renaming cols of joindf}
+join_df %<>% 
+  rename(시군구별_평균소득월액 = 평균소득월액,
+         시군구별_천명당사설학원수 = `인구 천명당 사설학원수<br>(A÷B×1000) (개)`,
+         시군구별_사설학원수 = `사설학원수<br>(A) (개)`,
+         시군구별_인구 = `주민등록인구<br>(B) (명)`,
+         읍면동구분 = region_type,
+         읍면동구분별_가구수 = `일반가구-계`,
+         읍면동구분별_경력단절여성가구 = `경력단절여성이 있는 가구`,
+         읍면동구분별_경력단절여성없는가구 = `경력단절여성이 없는 가구`,
+         읍면동구분별_경력단절여성가구비율 = career_prop,
+         읍면동별_다문화가구수 = immig_value,
+         읍면동별_다문화가구비율 = immig_prop,
+         시군구별_기초수급자비율 = low_income_rate,
+         시군구별_아동복지시설수 = `시설수 (개소)`,
+         시군구별_아동복지시설이용인원수 = `생활인원수 (명)`,
+         시군구별_아동복지시설이용비율 = child_welfare_prop,
+         시군구별_초등학생연령비율 = popul_prop,
+         시도별_읍면동구분별_지역아동센터이용비율 = alt_care_rate,
+         학원_지역구분 = region_type_2,
+         학원_지역구분별_1학년비율 = hagwon_rate_1,
+         학원_지역구분별_2학년비율 = hagwon_rate_2,
+         학원_지역구분별_3학년비율 = hagwon_rate_3,
+         학원_지역구분별_4학년비율 = hagwon_rate_4,
+         학원_지역구분별_5학년비율 = hagwon_rate_5,
+         학원_지역구분별_6학년비율 = hagwon_rate_6,
+         학교별_1학년비율 = rate_1,
+         학교별_2학년비율 = rate_2,
+         학교별_3학년비율 = rate_3,
+         학교별_4학년비율 = rate_4,
+         학교별_5학년비율 = rate_5,
+         학교별_6학년비율 = rate_6,
+         학교별_예상_학원참여도 = hagwon_rate_interpol)
+```
+
+# Final Joined Dataframe (`join_df`)
+
+```{r Expl-Join-Final: Displaying final version of joindf}
+join_df %>% 
+  head(10) %>% 
+  gt()
+```
+
+# Writing, Exporting Final Dataframe (`join_df`)
+
+```{r}
+write_csv(join_df, "data/join_df.csv")
+```
+
